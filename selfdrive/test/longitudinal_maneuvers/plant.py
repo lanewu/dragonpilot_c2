@@ -4,11 +4,17 @@ import numpy as np
 
 from cereal import log
 import cereal.messaging as messaging
-from openpilot.common.realtime import Ratekeeper, DT_MDL
-from openpilot.selfdrive.controls.lib.longcontrol import LongCtrlState
-from openpilot.selfdrive.modeld.constants import T_IDXS
-from openpilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlanner
-from openpilot.selfdrive.controls.radard import _LEAD_ACCEL_TAU
+from openpilot.selfdrive.test.dp_default_params import seed_default_params
+
+# Must run before the planner and car interfaces are imported (they read params at import/construction time).
+seed_default_params()
+
+from openpilot.common.realtime import Ratekeeper, DT_MDL  # noqa: E402
+from openpilot.selfdrive.controls.lib.longcontrol import LongCtrlState  # noqa: E402
+# selfdrive/modeld is not in this repo; legacy_modeld has the same T_IDXS as hybrid_modeld ModelConstants
+from openpilot.selfdrive.legacy_modeld.constants import T_IDXS  # noqa: E402
+from openpilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlanner  # noqa: E402
+from openpilot.selfdrive.controls.radard import _LEAD_ACCEL_TAU  # noqa: E402
 
 
 class Plant:
@@ -62,6 +68,8 @@ class Plant:
     control = messaging.new_message('controlsState')
     car_state = messaging.new_message('carState')
     model = messaging.new_message('modelV2')
+    # carControl is read by the planner's ACM; no orientationNED is set, so ACM stays inactive here
+    car_control = messaging.new_message('carControl')
     a_lead = (v_lead - self.v_lead_prev)/self.ts
     self.v_lead_prev = v_lead
 
@@ -108,6 +116,10 @@ class Plant:
     acceleration = log.XYZTData.new_message()
     acceleration.x = [float(x) for x in np.zeros_like(T_IDXS)]
     model.modelV2.acceleration = acceleration
+    # the planner's taco branch reads modelV2.orientationRate.z; zero curvature models the straight road these maneuvers assume
+    orientation_rate = log.XYZTData.new_message()
+    orientation_rate.z = [float(x) for x in np.zeros_like(T_IDXS)]
+    model.modelV2.orientationRate = orientation_rate
 
     control.controlsState.longControlState = LongCtrlState.pid if self.enabled else LongCtrlState.off
     control.controlsState.vCruise = float(v_cruise * 3.6)
@@ -120,6 +132,7 @@ class Plant:
     sm = {'radarState': radar.radarState,
           'carState': car_state.carState,
           'controlsState': control.controlsState,
+          'carControl': car_control.carControl,
           'modelV2': model.modelV2}
     self.planner.update(sm)
     self.speed = self.planner.v_desired_filter.x

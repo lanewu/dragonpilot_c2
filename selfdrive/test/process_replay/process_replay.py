@@ -23,6 +23,7 @@ from panda.python import ALTERNATIVE_EXPERIENCE
 from openpilot.selfdrive.car.car_helpers import get_car, interfaces
 from openpilot.selfdrive.manager.process_config import managed_processes
 from openpilot.selfdrive.test.process_replay.helpers import OpenpilotPrefix, DummySocket
+from openpilot.selfdrive.test.dp_default_params import seed_default_params
 from openpilot.selfdrive.test.process_replay.vision_meta import meta_from_camera_state, available_streams
 from openpilot.selfdrive.test.process_replay.migration import migrate_all
 from openpilot.selfdrive.test.process_replay.capture import ProcessOutputCapture
@@ -203,7 +204,8 @@ class ProcessContainer:
     fingerprint: Optional[str], capture_output: bool
   ):
     with self.prefix as p:
-      self._setup_env(params_config, environ_config)
+      self._setup_env(params_config, environ_config)  # sets PARAMS_ROOT
+      seed_default_params()  # must seed the same root the replay processes read
 
       if self.cfg.config_callback is not None:
         params = Params()
@@ -396,14 +398,18 @@ class MessageBasedRcvCallback:
 class FrequencyBasedRcvCallback:
   def __init__(self, trigger_msg_type):
     self.trigger_msg_type = trigger_msg_type
+    self.trigger_frame = 0
 
   def __call__(self, msg, cfg, frame):
     if msg.which() != self.trigger_msg_type:
       return False
 
+    # count trigger messages, not replay frames, so frames skipped by the replay still advance the rate
+    trigger_frame = self.trigger_frame
+    self.trigger_frame += 1
     resp_sockets = [
       s for s in cfg.subs
-      if frame % max(1, int(SERVICE_LIST[msg.which()].frequency / SERVICE_LIST[s].frequency)) == 0
+      if trigger_frame % max(1, int(SERVICE_LIST[msg.which()].frequency / SERVICE_LIST[s].frequency)) == 0
     ]
     return bool(len(resp_sockets))
 
@@ -421,16 +427,6 @@ def controlsd_config_callback(params, cfg, lr):
 
   assert controlsState is not None and initialized, "controlsState never initialized"
   params.put("ReplayControlsState", controlsState.as_builder().to_bytes())
-
-
-def laikad_config_pubsub_callback(params, cfg, lr):
-  ublox = params.get_bool("UbloxAvailable")
-  main_key = "ubloxGnss" if ublox else "qcomGnss"
-  sub_keys = ({"qcomGnss", } if ublox else {"ubloxGnss", })
-
-  cfg.pubs = set(cfg.pubs) - sub_keys
-  cfg.main_pub = main_key
-  cfg.main_pub_drained = True
 
 
 def locationd_config_pubsub_callback(params, cfg, lr):
@@ -454,6 +450,8 @@ CONFIGS = [
     config_callback=controlsd_config_callback,
     init_callback=controlsd_fingerprint_callback,
     should_recv_callback=controlsd_rcv_callback,
+    # regen segments do not carry wideRoadCameraState; upstream v0.8.16 ignores it the same way (submaster ignore_alive)
+    ignore_alive_pubs=["wideRoadCameraState"],
     tolerance=NUMPY_TOLERANCE,
     processing_time=0.004,
     main_pub="can",
@@ -518,17 +516,7 @@ CONFIGS = [
     subs=["ubloxGnss", "gpsLocationExternal"],
     ignore=["logMonoTime"],
   ),
-  ProcessConfig(
-    proc_name="laikad",
-    pubs=["ubloxGnss", "qcomGnss"],
-    subs=["gnssMeasurements"],
-    ignore=["logMonoTime"],
-    config_callback=laikad_config_pubsub_callback,
-    tolerance=NUMPY_TOLERANCE,
-    processing_time=0.002,
-    timeout=60*10,  # first messages are blocked on internet assistance
-    main_pub="ubloxGnss", # config_callback will switch this to qcom if needed
-  ),
+  # laikad is commented out in selfdrive/manager/process_config.py, so it is not replayed here
   ProcessConfig(
     proc_name="torqued",
     pubs=["liveLocationKalman", "carState", "carControl"],
@@ -723,6 +711,8 @@ def generate_params_config(lr=None, CP=None, fingerprint=None, custom_params=Non
     "Passive": False,
     "DisengageOnAccelerator": True,
     "DisableLogging": False,
+    "dp_lat_controller": "0",
+    "dp_lon_acm": "0",  # ACM off for replay
   }
 
   if custom_params is not None:

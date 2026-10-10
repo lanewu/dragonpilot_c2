@@ -1,14 +1,26 @@
 #!/usr/bin/env python3
+# Process replay regression test using a LOCAL baseline.
+#
+# Workflow:
+#   1. Generate the baseline on a known-good commit (full test only):
+#        python selfdrive/test/process_replay/test_processes.py --update-baseline
+#   2. Later, after changes, compare the current code against that baseline:
+#        python selfdrive/test/process_replay/test_processes.py
+#
+# The baseline lives in fakedata/baseline/ and holds exactly one version, named
+# {segment}_{proc}_{HEAD hash}.bz2. Nothing is uploaded and no ref_commit is used.
 import argparse
 import concurrent.futures
 import os
+import shutil
 import sys
 from collections import defaultdict
 from tqdm import tqdm
-from typing import Any, DefaultDict, Dict
+from typing import Any, DefaultDict, Dict, List, Optional, Tuple
 
 from openpilot.selfdrive.car.car_helpers import interface_names
-from openpilot.selfdrive.test.openpilotci import get_url, upload_file
+from openpilot.selfdrive.test.dp_default_params import seed_default_params
+from openpilot.selfdrive.test.openpilotci import get_url
 from openpilot.selfdrive.test.process_replay.compare_logs import compare_logs
 from openpilot.selfdrive.test.process_replay.process_replay import CONFIGS, PROC_REPLAY_DIR, FAKEDATA, check_openpilot_enabled, replay_process
 from openpilot.system.version import get_commit
@@ -16,6 +28,7 @@ from openpilot.tools.lib.filereader import FileReader
 from openpilot.tools.lib.logreader import LogReader
 from openpilot.tools.lib.helpers import save_log
 
+# Source routes that the generated segments below were produced from (provenance only).
 source_segments = [
   ("BODY", "937ccb7243511b65|2022-05-24--16-03-09--1"),        # COMMA.BODY
   ("HYUNDAI", "02c45f73a2e5c6e9|2021-01-01--19-08-22--1"),     # HYUNDAI.SONATA
@@ -40,6 +53,7 @@ source_segments = [
   #("VOLKSWAGEN2", "3cfdec54aa035f3f|2022-07-19--23-45-10--2"),  # VOLKSWAGEN.PASSAT_NMS
 ]
 
+# Generated input segments (downloaded read-only from openpilotci).
 segments = [
   ("BODY", "aregenECF15D9E559|2023-05-10--14-26-40--0"),
   ("HYUNDAI", "aregenAB9F543F70A|2023-05-10--14-28-25--0"),
@@ -63,25 +77,16 @@ segments = [
 # dashcamOnly makes don't need to be tested until a full port is done
 excluded_interfaces = ["mock", "mazda", "tesla"]
 
-BASE_URL = "https://commadataci.blob.core.windows.net/openpilotci/"
-REF_COMMIT_FN = os.path.join(PROC_REPLAY_DIR, "ref_commit")
+BASELINE_DIR = os.path.join(FAKEDATA, "baseline")
+CURRENT_DIR = os.path.join(FAKEDATA, "current")
 EXCLUDED_PROCS = {"modeld", "dmonitoringmodeld"}
 
 
 def run_test_process(data):
   segment, cfg, args, cur_log_fn, ref_log_path, lr_dat = data
-  res = None
-  if not args.upload_only:
-    lr = LogReader.from_bytes(lr_dat)
-    res, log_msgs = test_process(cfg, lr, segment, ref_log_path, cur_log_fn, args.ignore_fields, args.ignore_msgs)
-    # save logs so we can upload when updating refs
-    save_log(cur_log_fn, log_msgs)
-
-  if args.update_refs or args.upload_only:
-    print(f'Uploading: {os.path.basename(cur_log_fn)}')
-    assert os.path.exists(cur_log_fn), f"Cannot find log to upload: {cur_log_fn}"
-    upload_file(cur_log_fn, os.path.basename(cur_log_fn))
-    os.remove(cur_log_fn)
+  lr = LogReader.from_bytes(lr_dat)
+  res, log_msgs = test_process(cfg, lr, segment, ref_log_path, cur_log_fn, args.ignore_fields, args.ignore_msgs)
+  save_log(cur_log_fn, log_msgs)
   return (segment, cfg.proc_name, res)
 
 
@@ -97,8 +102,6 @@ def test_process(cfg, lr, segment, ref_log_path, new_log_path, ignore_fields=Non
   if ignore_msgs is None:
     ignore_msgs = []
 
-  ref_log_msgs = list(LogReader(ref_log_path))
-
   try:
     log_msgs = replay_process(cfg, lr, disable_progress=True)
   except Exception as e:
@@ -109,15 +112,39 @@ def test_process(cfg, lr, segment, ref_log_path, new_log_path, ignore_fields=Non
     if not check_openpilot_enabled(log_msgs):
       return f"Route did not enable at all or for long enough: {new_log_path}", log_msgs
 
+  # baseline generation: nothing to compare against
+  if ref_log_path is None:
+    return [], log_msgs
+
+  ref_log_msgs = list(LogReader(ref_log_path))
   try:
     return compare_logs(ref_log_msgs, log_msgs, ignore_fields + cfg.ignore, ignore_msgs, cfg.tolerance), log_msgs
   except Exception as e:
     return str(e), log_msgs
 
 
-def format_diff(results, log_paths, ref_commit):
+def get_baseline_commit() -> Optional[str]:
+  # The baseline must contain exactly one version; return its commit hash or None if absent.
+  if not os.path.isdir(BASELINE_DIR):
+    return None
+  commits = {fn[:-len(".bz2")].rsplit("_", 1)[1] for fn in os.listdir(BASELINE_DIR) if fn.endswith(".bz2")}
+  if len(commits) > 1:
+    raise Exception(f"Multiple baseline versions found in {BASELINE_DIR}: {sorted(commits)}. "
+                    "Regenerate with --update-baseline to keep a single version.")
+  return commits.pop() if commits else None
+
+
+def replace_baseline() -> None:
+  # Swap in the freshly generated outputs as the only baseline version.
+  shutil.rmtree(BASELINE_DIR, ignore_errors=True)
+  os.makedirs(BASELINE_DIR)
+  for fn in os.listdir(CURRENT_DIR):
+    shutil.move(os.path.join(CURRENT_DIR, fn), os.path.join(BASELINE_DIR, fn))
+
+
+def format_diff(results, log_paths, label):
   diff1, diff2 = "", ""
-  diff2 += f"***** tested against commit {ref_commit} *****\n"
+  diff2 += f"***** {label} *****\n"
 
   failed = False
   for segment, result in list(results.items()):
@@ -171,35 +198,37 @@ if __name__ == "__main__":
                       help="Extra fields or msgs to ignore (e.g. carState.events)")
   parser.add_argument("--ignore-msgs", type=str, nargs="*", default=[],
                       help="Msgs to ignore (e.g. carEvents)")
-  parser.add_argument("--update-refs", action="store_true",
-                      help="Updates reference logs using current commit")
-  parser.add_argument("--upload-only", action="store_true",
-                      help="Skips testing processes and uploads logs from previous test run")
+  parser.add_argument("--update-baseline", action="store_true",
+                      help="Regenerate the local baseline from the current commit (requires full test)")
   parser.add_argument("-j", "--jobs", type=int, default=1)
   args = parser.parse_args()
+
+  seed_default_params()
 
   tested_procs = set(args.whitelist_procs) - set(args.blacklist_procs)
   tested_cars = set(args.whitelist_cars) - set(args.blacklist_cars)
   tested_cars = {c.upper() for c in tested_cars}
 
   full_test = (tested_procs == all_procs) and (tested_cars == all_cars) and all(len(x) == 0 for x in (args.ignore_fields, args.ignore_msgs))
-  upload = args.update_refs or args.upload_only
-  os.makedirs(os.path.dirname(FAKEDATA), exist_ok=True)
 
-  if upload:
-    assert full_test, "Need to run full test when updating refs"
-
-  try:
-    ref_commit = open(REF_COMMIT_FN).read().strip()
-  except FileNotFoundError:
-    print("Couldn't find reference commit")
-    sys.exit(1)
+  if args.update_baseline:
+    assert full_test, "Need to run full test when updating the local baseline"
 
   cur_commit = get_commit()
   if cur_commit is None:
     raise Exception("Couldn't get current commit")
 
-  print(f"***** testing against commit {ref_commit} *****")
+  baseline_commit: Optional[str] = None
+  if not args.update_baseline:
+    baseline_commit = get_baseline_commit()
+    if baseline_commit is None:
+      print(f"No local baseline found in {BASELINE_DIR}. Generate it first with --update-baseline.")
+      sys.exit(1)
+    print(f"***** testing against local baseline commit {baseline_commit} *****")
+
+  # outputs of this run; cleared every run so only the current results remain
+  shutil.rmtree(CURRENT_DIR, ignore_errors=True)
+  os.makedirs(CURRENT_DIR)
 
   # check to make sure all car brands are tested
   if full_test:
@@ -208,14 +237,14 @@ if __name__ == "__main__":
 
   log_paths: DefaultDict[str, Dict[str, Dict[str, str]]] = defaultdict(lambda: defaultdict(dict))
   with concurrent.futures.ProcessPoolExecutor(max_workers=args.jobs) as pool:
-    if not args.upload_only:
-      download_segments = [seg for car, seg in segments if car in tested_cars]
-      log_data: Dict[str, LogReader] = {}
-      p1 = pool.map(get_log_data, download_segments)
-      for segment, lr in tqdm(p1, desc="Getting Logs", total=len(download_segments)):
-        log_data[segment] = lr
+    download_segments = [seg for car, seg in segments if car in tested_cars]
+    log_data: Dict[str, bytes] = {}
+    p1 = pool.map(get_log_data, download_segments)
+    for segment, lr in tqdm(p1, desc="Getting Logs", total=len(download_segments)):
+      log_data[segment] = lr
 
     pool_args: Any = []
+    missing: List[Tuple[str, str]] = []
     for car_brand, segment in segments:
       if car_brand not in tested_cars:
         continue
@@ -224,41 +253,47 @@ if __name__ == "__main__":
         if cfg.proc_name not in tested_procs:
           continue
 
-        cur_log_fn = os.path.join(FAKEDATA, f"{segment}_{cfg.proc_name}_{cur_commit}.bz2")
-        if args.update_refs:  # reference logs will not exist if routes were just regenerated
-          ref_log_path = get_url(*segment.rsplit("--", 1))
+        cur_log_fn = os.path.join(CURRENT_DIR, f"{segment}_{cfg.proc_name}_{cur_commit}.bz2")
+        if args.update_baseline:
+          ref_log_path = None
         else:
-          ref_log_fn = os.path.join(FAKEDATA, f"{segment}_{cfg.proc_name}_{ref_commit}.bz2")
-          ref_log_path = ref_log_fn if os.path.exists(ref_log_fn) else BASE_URL + os.path.basename(ref_log_fn)
+          ref_log_path = os.path.join(BASELINE_DIR, f"{segment}_{cfg.proc_name}_{baseline_commit}.bz2")
+          if not os.path.exists(ref_log_path):
+            missing.append((segment, cfg.proc_name))
 
-        dat = None if args.upload_only else log_data[segment]
-        pool_args.append((segment, cfg, args, cur_log_fn, ref_log_path, dat))
+        pool_args.append((segment, cfg, args, cur_log_fn, ref_log_path, log_data[segment]))
 
-        log_paths[segment][cfg.proc_name]['ref'] = ref_log_path
+        log_paths[segment][cfg.proc_name]['ref'] = ref_log_path if ref_log_path else "n/a (baseline generation)"
         log_paths[segment][cfg.proc_name]['new'] = cur_log_fn
+
+    if missing:
+      print(f"Missing {len(missing)} baseline file(s) for commit {baseline_commit}, e.g. {missing[0]}")
+      print("Regenerate them with --update-baseline (full test).")
+      sys.exit(1)
 
     results: Any = defaultdict(dict)
     p2 = pool.map(run_test_process, pool_args)
     for (segment, proc, result) in tqdm(p2, desc="Running Tests", total=len(pool_args)):
-      if not args.upload_only:
-        results[segment][proc] = result
+      results[segment][proc] = result
 
-  diff1, diff2, failed = format_diff(results, log_paths, ref_commit)
-  if not upload:
-    with open(os.path.join(PROC_REPLAY_DIR, "diff.txt"), "w") as f:
-      f.write(diff2)
+  if args.update_baseline:
+    diff1, _, failed = format_diff(results, log_paths, f"baseline generation at commit {cur_commit}")
     print(diff1)
-
     if failed:
-      print("TEST FAILED")
-      print("\n\nTo push the new reference logs for this commit run:")
-      print("./test_processes.py --upload-only")
-    else:
-      print("TEST SUCCEEDED")
+      print("BASELINE NOT UPDATED: some processes failed to generate output")
+      sys.exit(1)
+    replace_baseline()
+    print(f"Updated local baseline for commit: {cur_commit} in {BASELINE_DIR}")
+    sys.exit(0)
 
+  diff1, diff2, failed = format_diff(results, log_paths, f"tested against local baseline commit {baseline_commit}")
+  with open(os.path.join(PROC_REPLAY_DIR, "diff.txt"), "w") as f:
+    f.write(diff2)
+  print(diff1)
+
+  if failed:
+    print("TEST FAILED")
   else:
-    with open(REF_COMMIT_FN, "w") as f:
-      f.write(cur_commit)
-    print(f"\n\nUpdated reference logs for commit: {cur_commit}")
+    print("TEST SUCCEEDED")
 
   sys.exit(int(failed))
