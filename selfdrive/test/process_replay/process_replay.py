@@ -450,7 +450,7 @@ CONFIGS = [
     config_callback=controlsd_config_callback,
     init_callback=controlsd_fingerprint_callback,
     should_recv_callback=controlsd_rcv_callback,
-    # regen segments do not carry wideRoadCameraState; upstream v0.8.16 ignores it the same way (submaster ignore_alive)
+    # upstream v0.8.16 also ignores it (TODO: Add to regen)
     ignore_alive_pubs=["wideRoadCameraState"],
     tolerance=NUMPY_TOLERANCE,
     processing_time=0.004,

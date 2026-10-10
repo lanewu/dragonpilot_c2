@@ -41,7 +41,7 @@ def main(base_dir, new_dir):
       failed += 1
     else:
       print(f"SAME    {seg} {proc}")
-  print(f"compared {len(names)} files, not-identical {failed}")
+  print(f"compared {len(base)} files, not-identical {failed}")
   return failed
 
 
