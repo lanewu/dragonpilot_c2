@@ -6,6 +6,7 @@ import unittest
 
 from openpilot.common.params import Params
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import STOP_DISTANCE
+from openpilot.selfdrive.test.dp_default_params import seed_default_params
 from openpilot.selfdrive.test.longitudinal_maneuvers.maneuver import Maneuver
 
 
@@ -160,6 +161,7 @@ class LongitudinalControl(unittest.TestCase):
     params.clear_all()
     params.put_bool("Passive", bool(os.getenv("PASSIVE")))
     params.put_bool("OpenpilotEnabledToggle", True)
+    seed_default_params()  # clear_all() above also removes the dp defaults the planner reads
 
   def test_maneuver(self):
     for maneuver in create_maneuvers({"e2e": self.e2e, "force_decel": self.force_decel}):
