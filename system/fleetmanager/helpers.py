@@ -253,7 +253,6 @@ PARAM_DESCRIPTIONS = {
     "dp_lateral_torque_ki": "PID实时I值设置",
     "dp_disable_gps": "禁用GPS功能", 
     "dp_lon_acm": "纵向ACM控制",
-    "dp_lon_acm_downhill": "下坡纵向ACM控制",
     "dp_lead_start_alert_threshold": "前车起步检测阈值(m/s)",
     "dp_lead_stop_time_threshold": "前车停止时间阈值(s)",
     "dp_lat_use_siglin": "BYD Siglin模式开关",

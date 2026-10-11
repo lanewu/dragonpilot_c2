@@ -89,7 +89,6 @@ class LongitudinalPlanner:
     self.acm_enabled = False
     self.prev_accel_clip = [A_CRUISE_MIN, get_max_accel(0.0)]
     self.acm_param = False
-    self.acm_downhill_param = False
     self.output_should_stop = False
     self.output_a_target = 0.0
 
@@ -132,7 +131,6 @@ class LongitudinalPlanner:
     self.dp_long_use_krkeegen_tune = self.params.get_bool('dp_long_use_krkeegen_tune')
     # 添加ACM参数读取
     self.acm_param = self.params.get_bool('dp_lon_acm')
-    self.acm_downhill_param = self.params.get_bool('dp_lon_acm_downhill')
 
   @staticmethod
   def parse_model(model_msg, model_error, v_ego, taco=False):
@@ -161,19 +159,9 @@ class LongitudinalPlanner:
     if self.param_read_counter % 50 == 0:
       self.read_param()
 
-    # 在update方法中添加ACM控制逻辑
-    # 根据参数更新ACM的启用状态
-    if not self.acm_enabled and self.acm_param:
-      self.acm_enabled = True
-      self.acm.set_enabled(True)
-      if self.acm_downhill_param:
-        self.acm.set_downhill_only(True)
-    elif self.acm_enabled and not self.acm_param:
-      self.acm_enabled = False
-      self.acm.set_enabled(False)
-      # 当ACM禁用时，重置ACM状态，避免影响后续控制
-      self.acm.active = False
-      self.acm.just_disabled = True # 标记刚刚禁用，可能需要重置MPC状态
+    # ACM follows the dp_lon_acm parameter (checked every 50 cycles)
+    self.acm_enabled = self.acm_param
+    self.acm.enabled = self.acm_param
 
     if self.param_read_counter % 100 == 0:
       self.accel_controller.set_profile(self.params.get("dp_long_accel_profile", encoding='utf-8'))
@@ -267,30 +255,20 @@ class LongitudinalPlanner:
     self.a_desired = float(interp(self.dt, ModelConstants.T_IDXS[:CONTROL_N], self.a_desired_trajectory))
     self.v_desired_filter.x = max(0.0, min(self.v_desired_filter.x + self.dt * (self.a_desired + a_prev) / 2.0, V_CRUISE_MAX * CV.KPH_TO_MS))
 
-    # 计算最终输出加速度并应用ACM处理
+    # 计算最终输出加速度（基于ACM处理后的轨迹）
     # 获取纵向执行器延迟时间，使用上下限平均值
     lower = getattr(self.CP, 'longitudinalActuatorDelayLowerBound', 0.15)  # 默认下限0.15秒
     upper = getattr(self.CP, 'longitudinalActuatorDelayUpperBound', 0.15)  # 默认上限0.15秒
     action_t = ((lower + upper) / 2.0) + DT_MDL  # 平均延迟加上模型时间步长
     output_a_target, self.output_should_stop = get_accel_from_plan(self.v_desired_trajectory, self.a_desired_trajectory,
                                                                  action_t=action_t, vEgoStopping=self.CP.vEgoStopping)
-    # 只在ACM开关打开且ACM激活时执行ACM相关操作
-    if self.acm_enabled and self.acm.active:
-        # ACM处理和限制优化
-        output_a_target = self.acm.update_output_a_target(output_a_target)
 
     # 应用平滑限制
     accel_clip = accel_limits_turns.copy()
-    # 如果ACM激活，使用ACM的输出值和限制
-    if self.acm_enabled and self.acm.active: # 检查 LongitudinalPlanner 的 acm_enabled 标志和 ACM 对象的 active 状态
-        self.output_a_target = output_a_target
-        self.prev_accel_clip = accel_clip # 在ACM激活时，prev_accel_clip 应该更新为当前的 accel_clip
-    else:
-        # 正常的平滑限制处理
-        for idx in range(2):
-            accel_clip[idx] = np.clip(accel_clip[idx], self.prev_accel_clip[idx] - 0.05, self.prev_accel_clip[idx] + 0.05)
-        self.output_a_target = np.clip(output_a_target, accel_clip[0], accel_clip[1])
-        self.prev_accel_clip = accel_clip
+    for idx in range(2):
+      accel_clip[idx] = np.clip(accel_clip[idx], self.prev_accel_clip[idx] - 0.05, self.prev_accel_clip[idx] + 0.05)
+    self.output_a_target = np.clip(output_a_target, accel_clip[0], accel_clip[1])
+    self.prev_accel_clip = accel_clip
 
   def publish(self, sm, pm):
     plan_send = messaging.new_message('longitudinalPlan')
@@ -321,7 +299,6 @@ class LongitudinalPlanner:
 
     # 添加 ACM 状态
     longitudinalPlanExt.acmEnabled = self.acm_enabled
-    longitudinalPlanExt.acmDownhillOnly = self.acm_downhill_param
     longitudinalPlanExt.acmActive = self.acm.active
     # 添加期望跟车距离
     longitudinalPlanExt.desiredFollowDistance = self.desired_follow_distance
