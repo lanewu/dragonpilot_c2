@@ -279,7 +279,7 @@ class LongitudinalPlanner:
     longitudinalPlan.modelMonoTime = sm.logMonoTime['modelV2']
     longitudinalPlan.processingDelay = (plan_send.logMonoTime / 1e9) - sm.logMonoTime['modelV2']
 
-    longitudinalPlan.speeds = self.v_desired_trajectory.tolist()
+    longitudinalPlan.speeds = self.acm.update_speed_trajectory(self.v_desired_trajectory, sm['carState'].vEgo).tolist()
     longitudinalPlan.accels = self.a_desired_trajectory.tolist()
     longitudinalPlan.jerks = self.j_desired_trajectory.tolist()
 

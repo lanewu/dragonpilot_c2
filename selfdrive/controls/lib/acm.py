@@ -37,11 +37,18 @@ MIN_DIST_V = [15., 20., 25., 30.]  # m
 # Braking weaker than this (but still negative) is suppressed to 0
 MILD_BRAKE_LIMIT = -1.0  # m/s^2
 
+# Downhill when sin(pitch) is below this; assumes nose-up positive pitch in orientationNED
+DOWNHILL_SIN_PITCH = -0.04
+# Downhill coasting speed target is capped at cruise plus this margin
+MAX_SPEED_OVER_CRUISE = 15.0 / 3.6  # m/s (15 km/h)
+
 class ACM:
   def __init__(self):
     self.enabled = False  # set by the planner from the dp_lon_acm parameter
     self.active = False
     self.just_disabled = False  # True for one cycle when ACM turns off
+    self.is_downhill = False
+    self.speed_cap = float('inf')  # m/s
     self.lead_ttc = float('inf')
 
     self._is_speed_over_cruise = False
@@ -98,11 +105,14 @@ class ACM:
     """Update ACM state. Must be called every planner cycle."""
     active_prev = self._active_prev
     self.active = False
+    self.is_downhill = False
+    self.speed_cap = v_cruise + MAX_SPEED_OVER_CRUISE
 
     # Disabled, or incomplete orientation data: stay inactive
     if self.enabled and len(cc.orientationNED) == 3:
       current_time = time.monotonic()
       lead = rs.leadOne
+      self.is_downhill = np.sin(cc.orientationNED[1]) < DOWNHILL_SIN_PITCH
 
       # Emergency conditions take priority over everything else
       if not self._check_emergency_conditions(lead, v_ego, current_time):
@@ -133,8 +143,15 @@ class ACM:
       self.active = False
       return a_desired_trajectory
 
-    # Allow coasting: zero only mild braking, preserve anything stronger
+    # Coasting: zero mild braking, or all braking downhill so gravity can add speed
     modified_trajectory = np.copy(a_desired_trajectory)
-    mild_brake = (modified_trajectory > MILD_BRAKE_LIMIT) & (modified_trajectory < 0.0)
-    modified_trajectory[mild_brake] = 0.0
+    brake_limit = -np.inf if self.is_downhill else MILD_BRAKE_LIMIT
+    braking = (modified_trajectory > brake_limit) & (modified_trajectory < 0.0)
+    modified_trajectory[braking] = 0.0
     return modified_trajectory
+
+  def update_speed_trajectory(self, speeds, v_ego):
+    # Otherwise LongControl's PID sees a negative speed error and brakes anyway
+    if not self.active or not self.is_downhill:
+      return speeds
+    return np.maximum(speeds, np.minimum(v_ego, self.speed_cap))
