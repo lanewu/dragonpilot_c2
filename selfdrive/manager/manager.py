@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import datetime
+import threading
 import time
 import os
 import signal
@@ -14,7 +15,7 @@ import openpilot.selfdrive.sentry as sentry
 from openpilot.common.basedir import BASEDIR
 from openpilot.common.params import Params, ParamKeyType
 from openpilot.common.text_window import TextWindow
-from openpilot.selfdrive.boardd.set_time import set_time
+from openpilot.selfdrive.boardd.set_time import set_time, check_gps_offset, GPS_CHECK_TIMEOUT_S
 from openpilot.system.hardware import HARDWARE, PC
 from openpilot.selfdrive.manager.helpers import unblock_stdout, write_onroad_params
 from openpilot.selfdrive.manager.process import ensure_running
@@ -203,6 +204,11 @@ def manager_cleanup() -> None:
   cloudlog.info("everything is dead")
 
 
+def gps_check_and_mark(gps_verified: threading.Event) -> None:
+  if check_gps_offset(cloudlog, GPS_CHECK_TIMEOUT_S):
+    gps_verified.set()
+
+
 def manager_thread() -> None:
   cloudlog.bind(daemon="manager")
   cloudlog.info("manager start")
@@ -273,6 +279,8 @@ def manager_thread() -> None:
   ensure_running(managed_processes.values(), False, params=params, CP=sm['carParams'], not_run=ignore)
 
   started_prev = False
+  gps_checked = False
+  gps_verified = threading.Event()
   last_time_save = 0  # 添加时间保存计数器
   while True:
     sm.update()
@@ -291,7 +299,8 @@ def manager_thread() -> None:
     # 1. 每5分钟保存一次基础时间
     # 2. 网络连接成功时
     # 3. 进入或退出行驶状态时
-    if (current_time - last_time_save >= 300 or  # 5分钟
+    # LastValidTime is only written once GPS has verified the system clock
+    if gps_verified.is_set() and (current_time - last_time_save >= 300 or  # 5分钟
         (sm.updated['deviceState'] and sm['deviceState'].networkType != last_network_type) or
         started != started_prev):
       try:
@@ -299,6 +308,12 @@ def manager_thread() -> None:
         last_time_save = current_time
       except Exception as e:
         cloudlog.warning(f"保存系统时间失败: {str(e)}")
+
+    # gpsLocationExternal is only published once ubloxd is running
+    ubloxd = managed_processes.get('ubloxd')
+    if not gps_checked and ubloxd is not None and ubloxd.proc is not None and ubloxd.proc.is_alive():
+      gps_checked = True
+      threading.Thread(target=gps_check_and_mark, args=(gps_verified,), daemon=True).start()
 
     # 添加进程状态监控
     process_states = {}

@@ -13,11 +13,12 @@ LAST_TIME_KEY = "LastValidTime"
 # 设置最小有效时间为2025年3月15日，使用UTC时区
 MIN_DATE_UTC = datetime.datetime(2025, 3, 15, tzinfo=datetime.timezone.utc)
 GPS_OFFSET_THRESHOLD_S = 5.0
+GPS_CHECK_TIMEOUT_S = 60.0
 NTP_SERVERS = [
-    "ntp.aliyun.com",         # 阿里云
-    "ntp.tencent.com",        # 腾讯
-    "cn.ntp.org.cn",          # 中国 NTP 池
-    "ntp.ntsc.ac.cn"          # 中国科学院国家授时中心
+    "www.nrc-cnrc.gc.ca",     # National Research Council Canada, Ottawa
+    "www.google.com",
+    "www.cloudflare.com",
+    "www.microsoft.com"
 ]
 
 def save_last_valid_time(time_value, logger):
@@ -46,26 +47,40 @@ def get_ntp_time(logger):
   logger.warning("所有NTP服务器同步失败")
   return None
 
-def get_gps_time(logger):
+def get_gps_time(logger, timeout_s=5.0):
+    logger.info(f"正在尝试获取GPS时间 (超时 {timeout_s:.0f} s)...")
+    start = time.monotonic()
+    last_flags = None  # diagnostic: last valid flags seen, to tell no-fix from stale data
     try:
-        logger.info("正在尝试获取GPS时间...")
         sm = messaging.SubMaster(['gpsLocationExternal'])
-        for i in range(50):
-            sm.update()
+        while time.monotonic() - start < timeout_s:
+            sm.update(100)
             if sm.updated['gpsLocationExternal'] and sm.valid['gpsLocationExternal']:
                 log = sm['gpsLocationExternal']
+                last_flags = log.flags
                 if log.flags % 2 != 0:
                     gps_time = datetime.datetime.fromtimestamp(log.unixTimestampMillis / 1000.0, datetime.timezone.utc)
                     if gps_time and gps_time > MIN_DATE_UTC:
-                        logger.info(f"GPS时间获取成功: {gps_time.astimezone().strftime('%Y-%m-%d %H:%M:%S %Z')}")
+                        logger.info(f"GPS时间获取成功 (耗时 {time.monotonic() - start:.1f} s): {gps_time.astimezone().strftime('%Y-%m-%d %H:%M:%S %Z')}")
                         return gps_time
-            if i % 10 == 0:
-                logger.debug(f"等待GPS数据... ({i/10}/5秒)")
-            time.sleep(0.1)
-        logger.warning("等待GPS数据超时")
     except Exception as e:
-        logger.error(f"GPS时间同步失败: {str(e)}")
+        logger.error(f"GPS时间同步失败 (耗时 {time.monotonic() - start:.1f} s): {str(e)}")
+        return None
+    logger.warning(f"等待GPS数据超时 (耗时 {time.monotonic() - start:.1f} s, 最后flags={last_flags})")
     return None
+
+def check_gps_offset(logger, timeout_s) -> bool:
+    gps_time = get_gps_time(logger, timeout_s)
+    if gps_time is None:
+        return False
+    sys_time = datetime.datetime.now(datetime.timezone.utc)
+    offset = (gps_time - sys_time).total_seconds()
+    logger.info(f"GPS时间: {gps_time.strftime('%Y-%m-%d %H:%M:%S')} UTC, 系统时间: {sys_time.strftime('%Y-%m-%d %H:%M:%S')} UTC, 偏差: {offset:.1f} s")
+    if abs(offset) > GPS_OFFSET_THRESHOLD_S:
+        if not set_system_time(gps_time, "GPS(偏差校正)", logger):
+            return False
+    save_last_valid_time(datetime.datetime.now(datetime.timezone.utc), logger)
+    return True
 
 def get_last_valid_time(logger):
   try:
@@ -109,14 +124,7 @@ def set_time(logger):
   sys_time = datetime.datetime.now(datetime.timezone.utc)
   if sys_time > MIN_DATE_UTC:
       logger.info(f"系统时间已有效: {sys_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-      # a plausible-looking clock can still be stale, so check it against GPS
-      gps_time = get_gps_time(logger)
-      if gps_time:
-          offset = (gps_time - sys_time).total_seconds()
-          logger.info(f"GPS时间: {gps_time.strftime('%Y-%m-%d %H:%M:%S')} UTC, 系统时间: {sys_time.strftime('%Y-%m-%d %H:%M:%S')} UTC, 偏差: {offset:.1f} s")
-          if abs(offset) > GPS_OFFSET_THRESHOLD_S:
-              set_system_time(gps_time, "GPS(偏差校正)", logger)
-      save_last_valid_time(datetime.datetime.now(datetime.timezone.utc), logger)
+      # GPS verification runs from manager once ubloxd is up
       return
 
   logger.warning(f"系统时间无效: {sys_time.strftime('%Y-%m-%d %H:%M:%S %Z')}, 开始尝试同步...")
