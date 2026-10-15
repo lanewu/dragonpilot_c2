@@ -12,6 +12,7 @@ PARAMS = Params()
 LAST_TIME_KEY = "LastValidTime"
 # 设置最小有效时间为2025年3月15日，使用UTC时区
 MIN_DATE_UTC = datetime.datetime(2025, 3, 15, tzinfo=datetime.timezone.utc)
+GPS_OFFSET_THRESHOLD_S = 5.0
 NTP_SERVERS = [
     "ntp.aliyun.com",         # 阿里云
     "ntp.tencent.com",        # 腾讯
@@ -108,7 +109,14 @@ def set_time(logger):
   sys_time = datetime.datetime.now(datetime.timezone.utc)
   if sys_time > MIN_DATE_UTC:
       logger.info(f"系统时间已有效: {sys_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-      save_last_valid_time(sys_time, logger)
+      # a plausible-looking clock can still be stale, so check it against GPS
+      gps_time = get_gps_time(logger)
+      if gps_time:
+          offset = (gps_time - sys_time).total_seconds()
+          logger.info(f"GPS时间: {gps_time.strftime('%Y-%m-%d %H:%M:%S')} UTC, 系统时间: {sys_time.strftime('%Y-%m-%d %H:%M:%S')} UTC, 偏差: {offset:.1f} s")
+          if abs(offset) > GPS_OFFSET_THRESHOLD_S:
+              set_system_time(gps_time, "GPS(偏差校正)", logger)
+      save_last_valid_time(datetime.datetime.now(datetime.timezone.utc), logger)
       return
 
   logger.warning(f"系统时间无效: {sys_time.strftime('%Y-%m-%d %H:%M:%S %Z')}, 开始尝试同步...")
