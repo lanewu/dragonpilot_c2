@@ -56,6 +56,12 @@ class ACM:
     self._active_prev = False
     self._last_lead_time = -float('inf')  # monotonic time of the last close lead
 
+    # Suppression episode tracking, for logging only (frames where braking is actually zeroed)
+    self._suppressing = False
+    self._suppress_start = 0.0
+    self._suppress_last = 0.0
+    self._suppress_frames = 0
+
   def _check_emergency_conditions(self, lead, v_ego, current_time):
     """Return True if a close, fast-closing lead requires an immediate ACM disable."""
     if not lead or not lead.status:
@@ -74,7 +80,6 @@ class ACM:
       return True
 
     return False
-
   def _update_lead_status(self, lead, v_ego, current_time):
     """Update lead vehicle detection status."""
     if lead and lead.status:
@@ -126,8 +131,16 @@ class ACM:
       cloudlog.info(f"ACM activated: v_ego={v_ego*3.6:.1f} km/h, v_cruise={v_cruise*3.6:.1f} km/h")
     elif self.just_disabled:
       cloudlog.info("ACM deactivated")
+      self._end_suppression()
 
     self._active_prev = self.active
+
+  def _end_suppression(self):
+    """Log the end of an open suppression episode, if any."""
+    if self._suppressing:
+      duration = self._suppress_last - self._suppress_start
+      cloudlog.info(f"ACM suppress end: frames={self._suppress_frames}, duration={duration:.2f} s")
+      self._suppressing = False
 
   def update_a_desired_trajectory(self, a_desired_trajectory):
     """Suppress mild braking in the acceleration trajectory while ACM is active.
@@ -147,6 +160,20 @@ class ACM:
     modified_trajectory = np.copy(a_desired_trajectory)
     brake_limit = -np.inf if self.is_downhill else MILD_BRAKE_LIMIT
     braking = (modified_trajectory > brake_limit) & (modified_trajectory < 0.0)
+
+    # Log suppression episodes: frames where braking is actually zeroed
+    if np.any(braking):
+      now = time.monotonic()
+      if not self._suppressing:
+        self._suppressing = True
+        self._suppress_start = now
+        self._suppress_frames = 0
+        cloudlog.info(f"ACM suppress start: min suppressed accel={np.min(modified_trajectory[braking]):.2f} m/s^2")
+      self._suppress_frames += 1
+      self._suppress_last = now
+    else:
+      self._end_suppression()
+
     modified_trajectory[braking] = 0.0
     return modified_trajectory
 
