@@ -14,12 +14,27 @@ LAST_TIME_KEY = "LastValidTime"
 MIN_DATE_UTC = datetime.datetime(2025, 3, 15, tzinfo=datetime.timezone.utc)
 GPS_OFFSET_THRESHOLD_S = 5.0
 GPS_CHECK_TIMEOUT_S = 60.0
+CLOCK_STEP_THRESHOLD_S = 1.0
 NTP_SERVERS = [
     "www.nrc-cnrc.gc.ca",     # National Research Council Canada, Ottawa
     "www.google.com",
     "www.cloudflare.com",
     "www.microsoft.com"
 ]
+
+class ClockStepMonitor:
+  # monotonic clock is not affected by settimeofday/date -s
+  def __init__(self, logger):
+    self._logger = logger
+    self._offset = time.time() - time.monotonic()
+    logger.info(f"时钟监控启动: 系统时间 {datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC, monotonic {time.monotonic():.3f} s")
+
+  def check(self):
+    offset = time.time() - time.monotonic()
+    step = offset - self._offset
+    if abs(step) > CLOCK_STEP_THRESHOLD_S:
+      self._logger.warning(f"系统时钟跳变 {step:+.3f} s, 跳变后系统时间: {datetime.datetime.fromtimestamp(time.time(), datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} UTC, monotonic {time.monotonic():.3f} s")
+      self._offset = offset
 
 def save_last_valid_time(time_value, logger):
     if time_value and time_value > MIN_DATE_UTC:

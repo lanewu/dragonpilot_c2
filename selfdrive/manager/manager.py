@@ -15,7 +15,7 @@ import openpilot.selfdrive.sentry as sentry
 from openpilot.common.basedir import BASEDIR
 from openpilot.common.params import Params, ParamKeyType
 from openpilot.common.text_window import TextWindow
-from openpilot.selfdrive.boardd.set_time import set_time, check_gps_offset, GPS_CHECK_TIMEOUT_S
+from openpilot.selfdrive.boardd.set_time import set_time, check_gps_offset, GPS_CHECK_TIMEOUT_S, ClockStepMonitor
 from openpilot.system.hardware import HARDWARE, PC
 from openpilot.selfdrive.manager.helpers import unblock_stdout, write_onroad_params
 from openpilot.selfdrive.manager.process import ensure_running
@@ -282,8 +282,10 @@ def manager_thread() -> None:
   gps_checked = False
   gps_verified = threading.Event()
   last_time_save = 0  # 添加时间保存计数器
+  clock_monitor = ClockStepMonitor(cloudlog)
   while True:
     sm.update()
+    clock_monitor.check()
 
     started = sm['deviceState'].started
     current_time = int(time.time())
