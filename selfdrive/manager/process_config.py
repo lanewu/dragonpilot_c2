@@ -50,7 +50,7 @@ procs = [
   NativeProcess("proclogd", "system/proclogd", ["./proclogd"], only_onroad),
   PythonProcess("logmessaged", "system.logmessaged", always_run),
   # PythonProcess("micd", "system.micd", callback=iscar),
-  # PythonProcess("timezoned", "system.timezoned", enabled=not PC, offroad=True),
+  PythonProcess("timezoned", "system.timezoned", only_offroad, enabled=not PC),
   DaemonProcess("manage_athenad", "selfdrive.athena.manage_athenad", "AthenadPid"),
   NativeProcess("dmonitoringmodeld", "selfdrive/hybrid_modeld", ["./dmonitoringmodeld"], driverview, enabled=(not PC or WEBCAM) and not NO_IR_CTRL),
   # NativeProcess("encoderd", "system/loggerd", ["./encoderd"]),
