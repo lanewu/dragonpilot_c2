@@ -168,7 +168,7 @@ class ACM:
         self._suppressing = True
         self._suppress_start = now
         self._suppress_frames = 0
-        cloudlog.info(f"ACM suppress start: min suppressed accel={np.min(modified_trajectory[braking]):.2f} m/s^2")
+        cloudlog.info(f"ACM suppress begin: min suppressed accel={np.min(modified_trajectory[braking]):.2f} m/s^2")
       self._suppress_frames += 1
       self._suppress_last = now
     else:
